@@ -20,3 +20,8 @@ If it doesn't work, try ``python run.py`` in this directory. e.g.
 ```
     $ python run.py
 ```
+
+Run in Terminal.
+```
+    $python runtest.py
+```
