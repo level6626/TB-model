@@ -2,7 +2,7 @@ from mesa.visualization.ModularVisualization import ModularServer
 from mesa.visualization.modules import CanvasGrid, ChartModule
 from mesa.visualization.UserParam import UserSettableParameter
 
-from TB.agents import Env, T, RestMP, InfectMP, ChronInfectMP, ActivatedMP, Source
+from TB.agents import Env, T, RestMP, InfectMP, ChronInfectMP, ActivatedMP, Source, Necrosis
 from TB.model import TB
 
 def TB_portrayal(agent):
@@ -23,7 +23,7 @@ def TB_portrayal(agent):
         portrayal["Color"] = ["#0000FF", "#0000FF", "#0000FF"]
         portrayal["Shape"] = "rect"
         portrayal["Filled"] = 'true'
-        portrayal["Layer"] = 2
+        portrayal["Layer"] = 1
         portrayal["w"] = 1
         portrayal["h"] = 1
 
@@ -31,7 +31,7 @@ def TB_portrayal(agent):
         portrayal["Color"] = ["#FFA500", "#FFA500", "#FFA500"]
         portrayal["Shape"] = "rect"
         portrayal["Filled"] = 'true'
-        portrayal["Layer"] = 3
+        portrayal["Layer"] = 1
         portrayal["w"] = 1
         portrayal["h"] = 1
 
@@ -39,7 +39,7 @@ def TB_portrayal(agent):
         portrayal["Color"] = ["#FF0000", "#FFF000", "#FF0000"]
         portrayal["Shape"] = "rect"
         portrayal["Filled"] = 'true'
-        portrayal["Layer"] = 3
+        portrayal["Layer"] = 1
         portrayal["w"] = 1
         portrayal["h"] = 1  
 
@@ -47,7 +47,7 @@ def TB_portrayal(agent):
         portrayal["Color"] = ["#FFC0CB", "#FFC0CB", "#FFC0CB"]
         portrayal["Shape"] = "rect"
         portrayal["Filled"] = 'true'
-        portrayal["Layer"] = 3
+        portrayal["Layer"] = 2
         portrayal["w"] = 1
         portrayal["h"] = 1   
     
@@ -59,28 +59,17 @@ def TB_portrayal(agent):
         portrayal["w"] = 1
         portrayal["h"] = 1
     
-
-
-    """
-    elif type(agent) is Chemokine:
-        if (agent.C >= 1.0):
-            portrayal["Color"] = ["#000000", "#000000", "#000000"]
-            portrayal["Shape"] = "rect"
-            portrayal["Filled"] = 'true'
-            portrayal["Layer"] = 2
-            portrayal["w"] = 1
-            portrayal["h"] = 1
-    """
+    elif type(agent) is Necrosis:
+        portrayal["Color"] = ["#CC7722", "#CC7722", "#CC7722"]
+        portrayal["Shape"] = "rect"
+        portrayal["Filled"] = 'true'
+        portrayal["Layer"] = 3
+        portrayal["w"] = 1
+        portrayal["h"] = 1
     
     return portrayal
 
 canvas_element = CanvasGrid(TB_portrayal, 100, 100, 500, 500)
-'''
-model_params = {
-    "RestMP": UserSettableParameter("checkbox", "restMP", True
-    ),
-}
-'''
 server = ModularServer(
     TB, [canvas_element], "TB")
 server.port = 8521

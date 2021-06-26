@@ -1,11 +1,10 @@
 import numpy as np
-from typing import (
-    Any
-)
+from typing import (Any)
 import random
+import math
 from mesa import Agent
 from mesa.space import accept_tuple_argument
-import TB.para as para
+from numpy.lib.twodim_base import triu_indices_from
 
 def accept_tuple_argument(wrapped_function):
     """Decorator to allow grid methods that take a list of (x, y) coord tuples
@@ -21,6 +20,11 @@ def accept_tuple_argument(wrapped_function):
             return wrapped_function(*args)
 
     return wrapper
+
+def sigmond(x):
+    # in random walk
+    return 1 / (1 + np.exp(-x))
+
 
 class DirectedRandomWalker(Agent):
     """
@@ -52,18 +56,23 @@ class DirectedRandomWalker(Agent):
     def directed_random_move(self)->tuple:
         """
         Random walk of cells towards chemokine gradient
-        Tp: type of class
 
-        Return: tuple of (x, y) as next-move
+        Return: tuple of (x, y) as next-move direction
         """
         # Choose the most possible cell to move
         next_moves = self.model.grid.get_neighborhood(self.pos, moore = True)
         pos_cnt = len(next_moves)
-        p = np.ones(pos_cnt) * 0.1
+        c = np.zeros(pos_cnt)
         for i in range(pos_cnt):
             if (self.model.env.C[next_moves[i][0], next_moves[i][1]] >= 1.0):
-                p[i] += self.model.env.C[next_moves[i][0], next_moves[i][1]]
-        p /= sum(p)
+                c[i] += self.model.env.C[next_moves[i][0], next_moves[i][1]]
+        c_mean = np.mean(c)
+        if c_mean > 0:
+            c_relative = (c - c_mean) / c_mean
+            c_sigmond = sigmond(c_relative * 15)
+            p = c_sigmond / np.sum(c_sigmond)
+        else:
+            p = np.ones(pos_cnt) / pos_cnt
         pre_index = np.array([0, 1, 2, 3, 4, 5, 6, 7])
         index = np.random.choice(pre_index[:pos_cnt], p = p)
 
@@ -102,7 +111,8 @@ class Env(Agent):
         """
         C: concentration of chemokine
         BE: No. of extracellular bacteria
-
+        death_cnt: No. of chronically infected macrophage die in the grid
+        Necrosis: the status of the grid, cells cannot excess necrotic places
         """
         super().__init__(unique_id, model)
         self.height = self.model.height
@@ -117,29 +127,24 @@ class Env(Agent):
         self.oneStep = 1
     
     def step(self):
-        for cnt in range(round(para.k / para.Dk)):
+        for cnt in range(round(self.model.k)):
             # Decay and Diffusion of chemokine
-            self.C = (1 - para.decayC) * self.C
+            self.C = (1 - self.model.decayC) * self.C
             self.Diffusion()
             
             # Replication of bacteria
-            self.BE = self.BE + para.alpha_BE * self.BE * (1 - (self.BE / para.K_BE))
+            self.BE = self.BE + self.model.alpha_BE * self.BE * (1 - (self.BE / self.model.K_BE))
+
+            # Necrosis
+            self.necrosis = self.death_cnt >= self.model.N_necr
     
     def Diffusion(self):
-        # self.C = self.C * (1 - para.diffC)
-        self.C1[1:-1, 1:-1] = self.C[1:-1, 1:-1] + para.diffC * (\
+        # Diffusion function
+        self.C1[1:-1, 1:-1] = self.C[1:-1, 1:-1] + self.model.diffC * (
         (self.C[2:, 1:-1] - 2*self.C[1:-1, 1:-1] + self.C[:-2, 1:-1])
           + (self.C[1:-1, 2:] - 2*self.C[1:-1, 1:-1] + self.C[1:-1, :-2]))
         
         self.C = self.C1.copy()
-        '''
-        for x in range(self.height):
-            for y in range(self.width):
-                ngh = np.array([(x-1,y),(x+1,y),(x,y-1),(x,y+1)])
-                for k in range(4):
-                    if 0 <= ngh[k,0] < self.height and 0 <= ngh[k,1] < self.width:
-                        self.C[x,y] += para.diffC / 4 * self.C[ngh[k,0],ngh[k,1]]
-        '''
 
     
     def timeAdd(self):
@@ -148,18 +153,30 @@ class Env(Agent):
     def timeRestore(self):
         self.time = 1
 
-
+class Necrosis(Agent):
+    """
+    Necrosis forms when a number of chronically infected macrophages burst or are killed by T cells
+    """
+    def __init__(self, unique_id, pos, model):
+        super().__init__(unique_id, model)
+        self.pos = pos
+    
 class T(DirectedRandomWalker):
     """
     T cells
     """
     def __init__(self, unique_id, pos, model, moore):
+        """
+        pos: position of the T cell
+        age: age of the T cell, ranging from 0 to T cell lifespan
+        """
         super().__init__(unique_id, pos, model, moore = moore)
         self.pos = pos
-        self.age = random.randint(0, para.T_ls)
+        self.age = random.randint(0, self.model.T_ls)
+
         self.start_time = 1
         self.time = 1
-        self.oneStep = 100 / para.k
+        self.oneStep = 100 / self.model.k
     
     def step(self):
         """
@@ -168,13 +185,13 @@ class T(DirectedRandomWalker):
         When there is one macrophage, T moves with the prob. T_move
         """
         next_move = self.directed_random_move()
-        if len(self.get_cell_list_contents([next_move], T)) == 0:
-            if (len(self.get_cell_list_contents([next_move], MP)) == 0) or (random.random() < para.T_move):
+        if len(self.get_cell_list_contents([next_move], T)) == 0 and self.model.env.necrosis[next_move] == False:
+            if (len(self.get_cell_list_contents([next_move], MP)) == 0) or (random.random() < self.model.T_move):
                 self.model.grid.move_agent(self, next_move)
         
         # Aging
         self.age += 1
-        if (self.age >= para.T_ls):
+        if (self.age >= self.model.T_ls):
             self.model.grid._remove_agent(self.pos, self)
             self.model.schedule.remove(self)
 
@@ -184,21 +201,31 @@ class MP(DirectedRandomWalker):
     """
     General macrophage
     """
-    def __init__(self, unique_id, pos, model, moore):    
+    def __init__(self, unique_id, pos, model, moore):
+        """
+        pos: position of the macrophage
+        age: age of the macrophage, ranging from 0 to macrophage lifespan
+        BI: internal bacteria of the macrophage
+        """        
         super().__init__(unique_id, pos, model, moore = moore)
         self.pos = pos
         self.age = 0
         self.BI = 0
+
         self.start_time = 1
         self.time = 1
-        self.oneStep = 100 / para.k
+        self.oneStep = 100 / self.model.k
     
     def ChemokineSecretion(self):
-        self.model.env.C[self.pos[0], self.pos[1]] += para.c_I
+        self.model.env.C[self.pos[0], self.pos[1]] += self.model.c_I
     
     def MPWalk(self):
+        """
+        Random walk towards chemokine gradient
+        Cannot be occupied by another macrophage
+        """
         next_move = self.directed_random_move()
-        if len(self.get_cell_list_contents([next_move], MP)) == 0:
+        if len(self.get_cell_list_contents([next_move], MP)) == 0 and self.model.env.necrosis[next_move] == False:
             self.model.grid.move_agent(self, next_move)
 
 class RestMP(MP):
@@ -206,66 +233,78 @@ class RestMP(MP):
     Rested Macrophage
     """
     def __init__(self, unique_id, pos, model, moore):
+        """
+        pos: position of the macrophage
+        age: age of the macrophage, ranging from 0 to rested macrophage lifespan
+        BI: internal bacteria of the macrophage
+        exist: whether the macrophage has died
+        """        
         super().__init__(unique_id, pos, model, moore = moore)
         self.pos = pos
-        self.age = random.randint(0, para.M_rls)
+        self.age = random.randint(0, self.model.M_rls)
+        self.exist = True
+
         self.start_time = 1
         self.time = 1
         self.walk_cnt = 0
-        self.oneStep = 100 / para.k
+        self.oneStep = 100 / self.model.k
     
     def step(self):
+        # walk for every 10 ticks
         if (self.walk_cnt == 10):
             self.MPWalk()
             self.walk_cnt = 0
         else:
             self.walk_cnt += 1
-
-
-        x, y = self.pos
-        this_cell = self.model.grid.get_cell_list_contents([self.pos])
-
+        
         # Kill extracellular bacteria or being infected
-        if (self.model.env.BE[x, y] <= para.N_RK):
-            self.model.env.BE[x, y] = 0
+        if (self.model.env.BE[self.pos] <= self.model.N_RK):
+            self.model.env.BE[self.pos] = 0
         else:
-            if (random.random() < para.p_k):
-                self.model.env.BE[x, y] -= para.N_RK
+            if (random.random() < self.model.p_k):
+                self.model.env.BE[self.pos] -= self.model.N_RK
             else:
                 self.model.grid._remove_agent(self.pos, self)
                 self.model.schedule.remove(self)
-                inMP = InfectMP(self.model.next_id(), self.pos, self.model, self.moore, para.N_RK)
+                self.exist = False
+                self.model.env.BE[self.pos] -= self.model.N_RK
+                inMP = InfectMP(self.model.next_id(), self.pos, self.model, self.moore, self.age, self.model.N_RK)
                 self.model.grid.place_agent(inMP, self.pos)
                 self.model.schedule.add(inMP)
         
         # Aging & Die
-        self.age += 1
-        if (self.age >= para.M_rls):
-            self.model.grid._remove_agent(self.pos, self)
-            self.model.schedule.remove(self)
+        if self.exist:
+            self.age += 1
+            if (self.age >= self.model.M_rls):
+                self.model.grid._remove_agent(self.pos, self)
+                self.model.schedule.remove(self)
     
-
 
 class InfectMP(MP):
     """
     Infected macrophage
     """
-    def __init__(self, unique_id, pos, model, moore, B_I):
+    def __init__(self, unique_id, pos, model, moore, age, B_I):
         """
-        B_I: No. of bacteria inside the infected macrophage
-        """
+        pos: position of the macrophage
+        age: age of the macrophage, same to when it is infected
+        BI: internal bacteria of the macrophage
+        exist: whether the macrophage has died
+        """        
         super().__init__(unique_id, pos, model, moore = moore)
         self.B_I = B_I
-        self.age = random.randint(0, para.M_rls)
+        self.age = age
+        self.exist = True
+
         self.start_time = 1
         self.time = 1
         self.walk_cnt = 0
-        self.oneStep = 100 / para.k
+        self.oneStep = 100 / self.model.k
 
     
     def step(self):
         # Random_walk
-        if (self.walk_cnt == 10000):
+        if (self.walk_cnt == 100):
             self.MPWalk()
             self.walk_cnt = 0
         else:
@@ -273,52 +312,63 @@ class InfectMP(MP):
 
         #Chemokine secretion & Growth of bacteria inside
         self.ChemokineSecretion()
-        self.B_I = pow(1 + para.alpha_BI, para.k) * self.B_I
+        self.B_I = pow(1 + self.model.alpha_BI, self.model.k) * self.B_I
         
         #Become chronically infected
-        if (self.B_I > para.N_c):
+        if (self.B_I > self.model.N_c):
             self.model.grid._remove_agent(self.pos, self)
             self.model.schedule.remove(self)
+            self.exist = False
             chinMP = ChronInfectMP(self.model.next_id(), self.pos, self.model, self.moore, self.B_I)
             self.model.grid.place_agent(chinMP, self.pos)
             self.model.schedule.add(chinMP)
 
         #Become activated by T cells
-            ngh = self.model.grid.get_neighbors(self.pos, moore = True, include_center = True)
+        if self.exist:
+            ngh = self.model.grid.get_neighbors(self.pos, moore = False, include_center = True)
             ngh_T = [obj for obj in ngh if isinstance(obj, T)]
-            if (random.random() < len(ngh_T) * 0.25):
+            if (random.random() < len(ngh_T) * self.model.T_actm):
                 self.model.grid._remove_agent(self.pos, self)
                 self.model.schedule.remove(self)
-                actMP = ActivatedtMP(self.model.next_id(), self.pos, self.model, self.moore)
+                self.exist = False
+                actMP = ActivatedMP(self.model.next_id(), self.pos, self.model, self.moore)
                 self.model.grid.place_agent(actMP, self.pos)
                 self.model.schedule.add(actMP)
 
         #Aging & Die, then release intracellular bacteria
-        self.age += 1
-        if (self.age >= para.M_rls):
-            x, y = self.pos
-            self.model.env.BE[x-1:x+2, y-1:y+2] += self.B_I / 9
-            self.model.grid._remove_agent(self.pos, self)
-            self.model.schedule.remove(self)
-
-
+        if self.exist:
+            self.age += 1
+            if (self.age >= self.model.M_rls):
+                x, y = self.pos
+                self.model.env.BE[x-1:x+2, y-1:y+2] += self.B_I / 9
+                self.model.grid._remove_agent(self.pos, self)
+                self.model.schedule.remove(self)
+                self.exist = False
 
 class ChronInfectMP(MP):
     """
     Chronically infected macrophage
     """
     def __init__(self, unique_id, pos, model, moore, B_I):
+        """
+        pos: position of the macrophage
+        age: age of the macrophage, ranging from 0 to chronically infected macrophage lifespan
+        BI: internal bacteria of the macrophage
+        exist: whether the macrophage has died
+        """        
         super().__init__(unique_id, pos, model, moore = moore)
         self.B_I = B_I
-        self.age = random.randint(0, para.M_rls)
+        self.age = random.randint(0, self.model.M_rls)
+        self.exist = True
+
         self.start_time = 1
         self.time = 1
         self.walk_cnt = 0
-        self.oneStep = 100 / para.k
+        self.oneStep = 100 / self.model.k
     
     def step(self):
         # Random walk
-        if (self.walk_cnt == 10000):
+        if (self.walk_cnt == 100):
             self.MPWalk()
             self.walk_cnt = 0
         else:
@@ -326,39 +376,52 @@ class ChronInfectMP(MP):
         
         #Chemokine secretion
         self.ChemokineSecretion()
-        for i in range(round(para.k)):
-            self.B_I = self.B_I + para.alpha_BI * self.B_I * (1 - self.B_I / (para.K_BI + 30))
+        for i in range(round(self.model.k)):
+            self.B_I = self.B_I + self.model.alpha_BI * self.B_I * (1 - self.B_I / (self.model.K_BI + 30))
+        
+        x, y = self.pos   
 
-        # Aging & Bursting
-        self.age += 1
-        if (self.age >= para.M_rls or self.B_I > para.K_BI):
-            x, y = self.pos
-            self.model.env.BE[x-1:x+2, y-1:y+2] += self.B_I / 9
+        #T cell killing
+        cell_T = self.get_cell_list_contents([self.pos], T)
+        if (len(cell_T) > 0 and random.random() < self.model.pT_k):
+            self.model.env.BE[x-1:x+2, y-1:y+2] += 0.5 * self.B_I / 9
             self.model.grid._remove_agent(self.pos, self)
             self.model.schedule.remove(self)
+            self.exist = False
             self.model.env.death_cnt[x, y] += 1.0
-        else:        
-            #T cell killing
-            cell_T = self.get_cell_list_contents([self.pos], T)
-            if (len(cell_T) > 0):
-                if (random.random() < para.pT_k):
-                    x, y = self.pos
-                    self.model.env.BE[x-1:x+2, y-1:y+2] += 0.5 * self.B_I / 9
-                    self.model.grid._remove_agent(self.pos, self)
-                    self.model.schedule.remove(self)
-                    self.model.env.death_cnt[x, y] += 1.0
 
+        # Aging & Bursting
+        if self.exist:
+            self.age += 1
+            if (self.age >= self.model.M_rls or self.B_I > self.model.K_BI):
+                self.model.env.BE[x-1:x+2, y-1:y+2] += self.B_I / 9
+                self.model.grid._remove_agent(self.pos, self)
+                self.model.schedule.remove(self)
+                self.exist = False
+                self.model.env.death_cnt[x, y] += 1.0
+        
+        if self.model.env.death_cnt[x, y] >= self.model.N_necr and self.model.env.necrosis[x, y] == False:
+            self.model.env.necrosis[x, y] = True
+            necrosis = Necrosis(self.model.next_id(), self.pos, self.model)
+            self.model.grid.place_agent(necrosis, self.pos)
+
+        
 class ActivatedMP(MP):
     """
     Activated macrophage
     """
     def __init__(self, unique_id, pos, model, moore):
+        """
+        pos: position of the macrophage
+        age: age of the macrophage, ranging from 0 to activated macrophage lifespan
+        """        
         super().__init__(unique_id, pos, model, moore = moore)
-        self.age = random.randint(0, para.M_rls)
+        self.age = random.randint(0, self.model.M_als)
+        
         self.start_time = 1
         self.time = 1
         self.walk_cnt = 0
-        self.oneStep = 100 / para.k
+        self.oneStep = 100 / self.model.k
 
     def step(self):
         # Random walk
@@ -368,19 +431,18 @@ class ActivatedMP(MP):
         else:
             self.walk_cnt += 1
         
-        #Chemokine secretion
+        # Chemokine secretion
         self.ChemokineSecretion()
 
-        #Kill extracellular bacteria
-        x, y = self.pos
-        if (self.model.env.BE[x, y] > para.N_phag):
-            self.model.env.BE[x, y] -= para.N_phag
+        # Kill extracellular bacteria
+        if (self.model.env.BE[self.pos] > self.model.N_phag):
+            self.model.env.BE[self.pos] -= self.model.N_phag
         else:
-            self.model.env.BE[x, y] = 0
+            self.model.env.BE[self.pos] = 0
         
-        #Aging
+        # Aging
         self.age += 1
-        if (self.age >= para.M_als):
+        if (self.age >= self.model.M_als):
             self.model.grid._remove_agent(self.pos, self)
             self.model.schedule.remove(self)
 
@@ -390,21 +452,24 @@ class Source(Agent):
     Blood vessel
     """
     def __init__(self, unique_id, pos, model):
+        """
+        pos: position of the vessel
+        """        
         super().__init__(unique_id, model)
         self.pos = pos
         self.time = 1
-        self.start_time = 144000 / para.k
-        self.oneStep = 1000 / para.k
+        self.start_time = 1
+        self.oneStep = 100 / self.model.k
         
-
     def step(self):
-        #Recruitment of macrophages and T cells
+        # Recruitment of macrophages and T cells based on prob.
         this_cell = self.model.grid.get_cell_list_contents([self.pos])
         place_MP = False
         place_T = False
-        if (random.random() < para.M_recr):
+        if (random.random() < self.model.M_recr):
             place_MP = True
-        if (random.random() < para.T_recr):
+        # Recruit T cells after self.model.t_T ticks
+        if ((random.random() < self.model.T_recr) and (self.model.schedule.time > self.model.t_T / self.model.k)):
             place_T = True
         if (place_T or place_MP):
             for obj in this_cell:
@@ -415,21 +480,18 @@ class Source(Agent):
                 if self.model.env.C[self.pos[0], self.pos[1]] < 1.0:
                         place_T = place_MP = False
         
-        if (place_MP):
+        if place_MP:
             newMP = RestMP(self.model.next_id(), self.pos, self.model, moore = True)
             self.model.grid.place_agent(newMP, newMP.pos)
             self.model.schedule.add(newMP)
-        if (place_T):
+        if place_T:
             newT = T(self.model.next_id(), self.pos, self.model, moore = True)
             self.model.grid.place_agent(newT, newT.pos)
             self.model.schedule.add(newT)
+        
 
     def timeAdd(self):
         self.time += 1
     
     def timeRestore(self):
         self.time = 1
-
-
-
-
